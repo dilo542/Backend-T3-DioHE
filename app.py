@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Union
 import tensorflow as tf
@@ -10,20 +10,22 @@ import joblib
 from tensorflow.keras.preprocessing import image
 import os
 import logging
+from functools import lru_cache
+
+# Módulo recomendador (se cargará bajo demanda)
 from recommender import ImprovedRecommender
 
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Clase para desencriptar pickle del recomendador
 class CustomUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
         # Si el pickle busca __main__.ImprovedRecommender, redirige a recommender.ImprovedRecommender
         if module == "__main__" and name == "ImprovedRecommender":
             module = "recommender"
         return super().find_class(module, name)
-
-
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="E-commerce ML Models API")
 
@@ -38,53 +40,91 @@ class SalesPredictionInput(BaseModel):
     dept: int
     date: str
 
-# Load all models and data
-class ModelLoader:
+# Carga perezosa de modelos
+class ModelManager:
     def __init__(self):
-        try:
-            logger.info("Starting to load models and data...")
-            
-            # Load recommender system and its data
-            logger.info("Loading recommender system...")
-            # Al cargar el pickle, usa el CustomUnpickler
+        self._recommender = None
+        self._classifier = None
+        self._sales_model = None
+        self._scaler = None
+        self._products_df = None
+        self._interactions_df = None
+        self._train_data = None
+        self._stores_data = None
+        self._features_data = None
+        
+    @property
+    def recommender(self):
+        if self._recommender is None:
+            logger.info("Loading recommender system on demand...")
             with open('models/recommender/recommender.pkl', 'rb') as f:
-                    recommender_model = CustomUnpickler(f).load()
-            self.products_df = pd.read_pickle('models/recommender/products_df.pkl')
-            self.interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
-            
-            # Load image classifier
-            logger.info("Loading image classifier...")
-            self.classifier = tf.keras.models.load_model('models/classifier/ecommerce_classifier.h5', compile=False)
-            self.class_names = ['jeans', 'sofa', 'tshirt', 'tv']
-            
-            # Load sales prediction model and data
-            logger.info("Loading sales prediction model...")
-            self.sales_model = tf.keras.models.load_model('models/sales/sales_prediction_model.h5', compile=False)
-            self.scaler = joblib.load('models/sales/scaler.pkl')
-            
-            # Load sales data
-            logger.info("Loading sales data...")
-            self.train_data = pd.read_csv('data/train.csv')
-            self.stores_data = pd.read_csv('data/stores.csv')
-            self.features_data = pd.read_csv('data/features.csv')
-            
-            # Convert dates to datetime
-            self.train_data['Date'] = pd.to_datetime(self.train_data['Date'])
-            self.features_data['Date'] = pd.to_datetime(self.features_data['Date'])
-            
-            logger.info("All models and data loaded successfully")
-        except Exception as e:
-            logger.error(f"Error loading models and data: {str(e)}")
-            raise
+                self._recommender = CustomUnpickler(f).load()
+        return self._recommender
+    
+    @property
+    def products_df(self):
+        if self._products_df is None:
+            logger.info("Loading products dataframe on demand...")
+            self._products_df = pd.read_pickle('models/recommender/products_df.pkl')
+        return self._products_df
+    
+    @property
+    def interactions_df(self):
+        if self._interactions_df is None:
+            logger.info("Loading interactions dataframe on demand...")
+            self._interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
+        return self._interactions_df
+    
+    @property
+    def classifier(self):
+        if self._classifier is None:
+            logger.info("Loading image classifier on demand...")
+            self._classifier = tf.keras.models.load_model('models/classifier/ecommerce_classifier.h5', compile=False)
+        return self._classifier
+        
+    @property
+    def class_names(self):
+        return ['jeans', 'sofa', 'tshirt', 'tv']
+    
+    @property
+    def sales_model(self):
+        if self._sales_model is None:
+            logger.info("Loading sales prediction model on demand...")
+            self._sales_model = tf.keras.models.load_model('models/sales/sales_prediction_model.h5', compile=False)
+        return self._sales_model
+    
+    @property
+    def scaler(self):
+        if self._scaler is None:
+            logger.info("Loading scaler on demand...")
+            self._scaler = joblib.load('models/sales/scaler.pkl')
+        return self._scaler
+    
+    @property
+    def train_data(self):
+        if self._train_data is None:
+            logger.info("Loading sales training data on demand...")
+            self._train_data = pd.read_csv('data/train.csv')
+            self._train_data['Date'] = pd.to_datetime(self._train_data['Date'])
+        return self._train_data
+    
+    @property
+    def stores_data(self):
+        if self._stores_data is None:
+            logger.info("Loading stores data on demand...")
+            self._stores_data = pd.read_csv('data/stores.csv')
+        return self._stores_data
+    
+    @property
+    def features_data(self):
+        if self._features_data is None:
+            logger.info("Loading features data on demand...")
+            self._features_data = pd.read_csv('data/features.csv')
+            self._features_data['Date'] = pd.to_datetime(self._features_data['Date'])
+        return self._features_data
 
-# Initialize models
-try:
-    logger.info("Initializing models...")
-    models = ModelLoader()
-    logger.info("Models initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize models: {str(e)}")
-    raise
+# Inicializar manejador de modelos (sin cargar nada aún)
+models = ModelManager()
 
 def prepare_sequence_for_prediction(store, dept, date, train_data, stores_data, features_data):
     """
@@ -140,31 +180,29 @@ def prepare_sequence_for_prediction(store, dept, date, train_data, stores_data, 
 
     return pd.DataFrame([features])
 
-def analyze_historical_patterns(train_data, store, dept, target_date):
+@lru_cache(maxsize=128)
+def analyze_historical_patterns(store, dept, date_str):
     """
     Analiza patrones históricos para ajustar predicciones.
+    Con caché para reducir procesamiento repetido.
     """
-    store_dept_data = train_data[
-        (train_data['Store'] == store) &
-        (train_data['Dept'] == dept)
+    target_date = pd.to_datetime(date_str)
+    
+    store_dept_data = models.train_data[
+        (models.train_data['Store'] == store) &
+        (models.train_data['Dept'] == dept)
     ].copy()
 
-    store_dept_data['Date'] = pd.to_datetime(store_dept_data['Date'])
-    target_date = pd.to_datetime(target_date)
-
-    # Patrones semanales
     store_dept_data['DayOfWeek'] = store_dept_data['Date'].dt.dayofweek
     recent_data = store_dept_data[store_dept_data['Date'] <= target_date].tail(12)
     dow_pattern = recent_data.groupby('DayOfWeek')['Weekly_Sales'].mean()
     dow_factor = dow_pattern.get(target_date.dayofweek, 1.0) / dow_pattern.mean() if not dow_pattern.empty else 1.0
 
-    # Patrones mensuales
     store_dept_data['Month'] = store_dept_data['Date'].dt.month
     month_pattern = store_dept_data.groupby('Month')['Weekly_Sales'].mean()
     month_factor = month_pattern.get(target_date.month, 1.0) / month_pattern.mean()
     month_factor = 1.0 + (month_factor - 1.0) * 0.5
 
-    # Tendencia reciente
     recent_weeks = [4, 8, 12]
     weights = [0.5, 0.3, 0.2]
     recent_trends = []
@@ -201,7 +239,7 @@ def analyze_historical_patterns(train_data, store, dept, target_date):
 def home():
     return {
         "health_check": "OK",
-        "models_loaded": [
+        "models_available": [
             "recommender_system",
             "image_classifier",
             "sales_predictor"
@@ -311,12 +349,11 @@ def predict_sales(input_data: SalesPredictionInput):
             features_data=models.features_data
         )
 
-        # Get historical patterns
+        # Get historical patterns (con caché)
         patterns = analyze_historical_patterns(
-            models.train_data,
             input_data.store,
             input_data.dept,
-            date
+            input_data.date
         )
 
         # Make base prediction
