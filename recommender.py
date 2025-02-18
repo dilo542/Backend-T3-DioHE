@@ -13,19 +13,19 @@ import json
 
 class ImprovedRecommender:
     def __init__(self, chunk_size: int = 1000):
-    self.chunk_size = chunk_size
-    self.setup_logging()
-    self.data_dir = Path('recommender_data')
-    self.data_dir.mkdir(exist_ok=True)
-
-    # Constantes
-    self.PRICE_RANGE_FACTOR = 0.3
-    self.CATEGORY_BOOST = 0.4
-    self.GENDER_BOOST = 0.5
-    self.MIN_RATING_WEIGHT = 3
+        self.chunk_size = chunk_size
+        self.setup_logging()
+        self.data_dir = Path('recommender_data')
+        self.data_dir.mkdir(exist_ok=True)
+    
+        # Constantes
+        self.PRICE_RANGE_FACTOR = 0.3
+        self.CATEGORY_BOOST = 0.4
+        self.GENDER_BOOST = 0.5
+        self.MIN_RATING_WEIGHT = 3
 
     # Inicializar popular_recommendations como una lista vacía
-    self.popular_recommendations = []
+        self.popular_recommendations = []
 
     def setup_logging(self):
         self.logger = logging.getLogger('ImprovedRecommender')
