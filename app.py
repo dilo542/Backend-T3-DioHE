@@ -14,7 +14,18 @@ from functools import lru_cache
 
 # Módulo recomendador (se cargará bajo demanda)
 from recommender import ImprovedRecommender
+from fastapi.middleware.cors import CORSMiddleware
 
+app = FastAPI()
+
+# Configura CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite todos los orígenes (en producción, cambia "*" por tu dominio frontend)
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos los métodos (GET, POST, etc.)
+    allow_headers=["*"],  # Permite todos los headers
+)
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
