@@ -15,7 +15,7 @@ class ImprovedRecommender:
     def __init__(self, chunk_size: int = 1000):
         self.chunk_size = chunk_size
         self.setup_logging()
-        self.data_dir = Path('recommender_data')
+        self.data_dir = Path('recommender/recommender_data')
         self.data_dir.mkdir(exist_ok=True)
 
         # Constantes
