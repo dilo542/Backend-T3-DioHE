@@ -68,6 +68,13 @@ class ModelManager:
             try:
                 with open('models/recommender/recommender.pkl', 'rb') as f:
                     self._recommender = CustomUnpickler(f).load()
+
+                 # Asegurarse de que se calculen las recomendaciones populares
+                if not hasattr(self._recommender, 'popular_recommendations'):
+                    logger.info("Computing popular recommendations after loading...")
+                    products_df = pd.read_pickle('models/recommender/products_df.pkl')
+                    interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
+                    self._recommender.process_data(products_df, interactions_df)
                 self._last_load['recommender'] = datetime.now()
             except Exception as e:
                 logger.error(f"Error loading recommender: {str(e)}")
@@ -181,7 +188,24 @@ def get_recommendations(input_data: RecommenderInput):
     """Endpoint para obtener recomendaciones de productos"""
     try:
         logger.info(f"Processing recommendation request: {input_data}")
-        
+        # Verificar el estado del recomendador
+        logger.info("Checking recommender state...")
+
+
+
+        # Verificar los archivos necesarios
+        data_files = [
+            'models/recommender/recommender.pkl',
+            'models/recommender/products_df.pkl',
+            'models/recommender/interactions_df.pkl'
+        ]
+        for file_path in data_files:
+            if not os.path.exists(file_path):
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Required file not found: {file_path}"
+                )
+                
         if input_data.user_id is not None:
             logger.info(f"Getting recommendations for user {input_data.user_id}")
             recommendations = models.recommender.get_recommendations(
@@ -393,6 +417,29 @@ def get_models_status():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/recommender/status")
+def get_recommender_status():
+    """Endpoint para verificar el estado del recomendador"""
+    try:
+        recommender = models.recommender
+        has_popular = hasattr(recommender, 'popular_recommendations')
+        num_popular = len(recommender.popular_recommendations) if has_popular else 0
+        
+        return {
+            "status": "loaded",
+            "has_popular_recommendations": has_popular,
+            "num_popular_recommendations": num_popular,
+            "data_dir_exists": recommender.data_dir.exists(),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
 
 @app.post("/models/reload")
 def reload_models():
