@@ -12,7 +12,7 @@ import os
 import logging
 from functools import lru_cache
 
-# Módulo recomendador (se cargará bajo demanda)
+# Módulo recomendador
 from recommender import ImprovedRecommender
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,20 +27,21 @@ app.add_middleware(
     allow_headers=["*"],  # Permite todos los headers
 )
 # Configurar logging
+
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Clase para desencriptar pickle del recomendador
 class CustomUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        # Si el pickle busca __main__.ImprovedRecommender, redirige a recommender.ImprovedRecommender
         if module == "__main__" and name == "ImprovedRecommender":
             module = "recommender"
         return super().find_class(module, name)
 
 app = FastAPI(title="E-commerce ML Models API")
 
-# Input validation models
+# Modelos de validación
 class RecommenderInput(BaseModel):
     user_id: Optional[int] = None
     product_history: Optional[List[int]] = None
@@ -51,7 +52,7 @@ class SalesPredictionInput(BaseModel):
     dept: int
     date: str
 
-# Carga perezosa de modelos
+# Manejador de modelos optimizado
 class ModelManager:
     def __init__(self):
         self._recommender = None
@@ -63,208 +64,203 @@ class ModelManager:
         self._train_data = None
         self._stores_data = None
         self._features_data = None
-        
+        self._last_load = {}
+        self._model_cache = {}
+    def load_initial_models(self):
+        """Carga inicial de modelos y datos"""
+        try:
+            logger.info("Loading initial models and data...")
+            
+            # Cargar recomendador y sus datos
+            if os.path.exists('models/recommender/recommender.pkl'):
+                with open('models/recommender/recommender.pkl', 'rb') as f:
+                    self._recommender = CustomUnpickler(f).load()
+                self._products_df = pd.read_pickle('models/recommender/products_df.pkl')
+                self._interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
+                self._recommender.process_data(self._products_df, self._interactions_df)
+                logger.info("Recommender system loaded successfully")
+            else:
+                logger.warning("Recommender model files not found")
+
+            # Cargar clasificador
+            if os.path.exists('models/classifier/ecommerce_classifier.h5'):
+                self._classifier = tf.keras.models.load_model(
+                    'models/classifier/ecommerce_classifier.h5',
+                    compile=False
+                )
+                logger.info("Classifier loaded successfully")
+            else:
+                logger.warning("Classifier model file not found")
+
+            # Cargar modelo de ventas y datos relacionados
+            if os.path.exists('models/sales/sales_prediction_model.h5'):
+                self._sales_model = tf.keras.models.load_model(
+                    'models/sales/sales_prediction_model.h5',
+                    compile=False
+                )
+                self._scaler = joblib.load('models/sales/scaler.pkl')
+                self._train_data = pd.read_csv('data/train.csv')
+                self._stores_data = pd.read_csv('data/stores.csv')
+                self._features_data = pd.read_csv('data/features.csv')
+                logger.info("Sales prediction model and data loaded successfully")
+            else:
+                logger.warning("Sales prediction model files not found")
+
+        except Exception as e:
+            logger.error(f"Error loading initial models: {str(e)}")
+            raise    
+    def _check_reload_needed(self, model_name: str, reload_interval: int = 3600) -> bool:
+        """Verifica si un modelo necesita ser recargado basado en el tiempo"""
+        last_load = self._last_load.get(model_name)
+        if last_load is None:
+            return True
+        return (datetime.now() - last_load).total_seconds() > reload_interval
+
     @property
     def recommender(self):
-        if self._recommender is None:
-            logger.info("Loading recommender system on demand...")
-            with open('models/recommender/recommender.pkl', 'rb') as f:
-                self._recommender = CustomUnpickler(f).load()
+        if self._recommender is None or self._check_reload_needed('recommender'):
+            logger.info("Loading recommender system...")
+            try:
+                with open('models/recommender/recommender.pkl', 'rb') as f:
+                    self._recommender = CustomUnpickler(f).load()
+
+                 # Asegurarse de que se calculen las recomendaciones populares
+                if not hasattr(self._recommender, 'popular_recommendations'):
+                    logger.info("Computing popular recommendations after loading...")
+                    products_df = pd.read_pickle('models/recommender/products_df.pkl')
+                    interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
+                    self._recommender.process_data(products_df, interactions_df)
+                self._last_load['recommender'] = datetime.now()
+            except Exception as e:
+                logger.error(f"Error loading recommender: {str(e)}")
+                raise
         return self._recommender
-    
-    @property
-    def products_df(self):
-        if self._products_df is None:
-            logger.info("Loading products dataframe on demand...")
-            self._products_df = pd.read_pickle('models/recommender/products_df.pkl')
-        return self._products_df
-    
-    @property
-    def interactions_df(self):
-        if self._interactions_df is None:
-            logger.info("Loading interactions dataframe on demand...")
-            self._interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
-        return self._interactions_df
-    
+
     @property
     def classifier(self):
-        if self._classifier is None:
-            logger.info("Loading image classifier on demand...")
-            self._classifier = tf.keras.models.load_model('models/classifier/ecommerce_classifier.h5', compile=False)
+        if self._classifier is None or self._check_reload_needed('classifier'):
+            logger.info("Loading image classifier...")
+            try:
+                self._classifier = tf.keras.models.load_model(
+                    'models/classifier/ecommerce_classifier.h5',
+                    compile=False
+                )
+                self._classifier.make_predict_function()  # Optimización para inferencia
+                self._last_load['classifier'] = datetime.now()
+            except Exception as e:
+                logger.error(f"Error loading classifier: {str(e)}")
+                raise
         return self._classifier
-        
-    @property
-    def class_names(self):
-        return ['jeans', 'sofa', 'tshirt', 'tv']
-    
+
     @property
     def sales_model(self):
-        if self._sales_model is None:
-            logger.info("Loading sales prediction model on demand...")
-            self._sales_model = tf.keras.models.load_model('models/sales/sales_prediction_model.h5', compile=False)
+        if self._sales_model is None or self._check_reload_needed('sales_model'):
+            logger.info("Loading sales prediction model...")
+            try:
+                self._sales_model = tf.keras.models.load_model(
+                    'models/sales/sales_prediction_model.h5',
+                    compile=False
+                )
+                self._last_load['sales_model'] = datetime.now()
+            except Exception as e:
+                logger.error(f"Error loading sales model: {str(e)}")
+                raise
         return self._sales_model
-    
+
     @property
     def scaler(self):
         if self._scaler is None:
-            logger.info("Loading scaler on demand...")
-            self._scaler = joblib.load('models/sales/scaler.pkl')
+            logger.info("Loading scaler...")
+            try:
+                self._scaler = joblib.load('models/sales/scaler.pkl')
+            except Exception as e:
+                logger.error(f"Error loading scaler: {str(e)}")
+                raise
         return self._scaler
-    
+
     @property
     def train_data(self):
         if self._train_data is None:
-            logger.info("Loading sales training data on demand...")
-            self._train_data = pd.read_csv('data/train.csv')
-            self._train_data['Date'] = pd.to_datetime(self._train_data['Date'])
+            logger.info("Loading training data...")
+            try:
+                self._train_data = pd.read_csv('data/train.csv')
+                self._train_data['Date'] = pd.to_datetime(self._train_data['Date'])
+            except Exception as e:
+                logger.error(f"Error loading training data: {str(e)}")
+                raise
         return self._train_data
-    
+
     @property
     def stores_data(self):
         if self._stores_data is None:
-            logger.info("Loading stores data on demand...")
-            self._stores_data = pd.read_csv('data/stores.csv')
+            logger.info("Loading stores data...")
+            try:
+                self._stores_data = pd.read_csv('data/stores.csv')
+            except Exception as e:
+                logger.error(f"Error loading stores data: {str(e)}")
+                raise
         return self._stores_data
-    
+
     @property
     def features_data(self):
         if self._features_data is None:
-            logger.info("Loading features data on demand...")
-            self._features_data = pd.read_csv('data/features.csv')
-            self._features_data['Date'] = pd.to_datetime(self._features_data['Date'])
+            logger.info("Loading features data...")
+            try:
+                self._features_data = pd.read_csv('data/features.csv')
+                self._features_data['Date'] = pd.to_datetime(self._features_data['Date'])
+            except Exception as e:
+                logger.error(f"Error loading features data: {str(e)}")
+                raise
         return self._features_data
 
-# Inicializar manejador de modelos (sin cargar nada aún)
+    def clear_cache(self):
+        """Limpia la caché de modelos"""
+        self._recommender = None
+        self._classifier = None
+        self._sales_model = None
+        self._last_load = {}
+        self._model_cache = {}
+
+# Inicializar manejador de modelos
 models = ModelManager()
-
-def prepare_sequence_for_prediction(store, dept, date, train_data, stores_data, features_data):
-    """
-    Prepara una secuencia para predicción sin escalado previo.
-    """
-    if isinstance(date, str):
-        date = pd.to_datetime(date)
-
-    store_info = stores_data[stores_data['Store'] == store].iloc[0]
-    date_features = features_data[
-        (features_data['Store'] == store) &
-        (features_data['Date'] == date)
-    ].iloc[0]
-
-    store_sales = train_data[train_data['Store'] == store]['Weekly_Sales']
-    dept_sales = train_data[
-        (train_data['Store'] == store) &
-        (train_data['Dept'] == dept)
-    ]['Weekly_Sales']
-
-    store_avg = store_sales.mean()
-    store_std = store_sales.std()
-    dept_avg = dept_sales.mean()
-    dept_std = dept_sales.std()
-
-    features = {
-        'Store': store,
-        'Dept': dept,
-        'Temperature': date_features['Temperature'],
-        'Fuel_Price': date_features['Fuel_Price'],
-        'CPI': date_features['CPI'],
-        'Unemployment': date_features['Unemployment'],
-        'MarkDown1': date_features.get('MarkDown1', 0) if not pd.isna(date_features.get('MarkDown1')) else 0,
-        'MarkDown2': date_features.get('MarkDown2', 0) if not pd.isna(date_features.get('MarkDown2')) else 0,
-        'MarkDown3': date_features.get('MarkDown3', 0) if not pd.isna(date_features.get('MarkDown3')) else 0,
-        'MarkDown4': date_features.get('MarkDown4', 0) if not pd.isna(date_features.get('MarkDown4')) else 0,
-        'MarkDown5': date_features.get('MarkDown5', 0) if not pd.isna(date_features.get('MarkDown5')) else 0,
-        'Month': date.month,
-        'Week': date.isocalendar()[1],
-        'DayOfWeek': date.dayofweek,
-        'IsHoliday': int(date_features['IsHoliday']),
-        'Size': store_info['Size'],
-        'Store_Avg_Sales': store_avg,
-        'Store_Std_Sales': store_std,
-        'Dept_Avg_Sales': dept_avg,
-        'Dept_Std_Sales': dept_std,
-        'IsSummer': int(date.month in [6, 7, 8]),
-        'IsWinter': int(date.month in [12, 1, 2]),
-        'IsWeekend': int(date.dayofweek in [5, 6]),
-        'Type_A': int(store_info['Type'] == 'A'),
-        'Type_B': int(store_info['Type'] == 'B')
-    }
-
-    return pd.DataFrame([features])
-
-@lru_cache(maxsize=128)
-def analyze_historical_patterns(store, dept, date_str):
-    """
-    Analiza patrones históricos para ajustar predicciones.
-    Con caché para reducir procesamiento repetido.
-    """
-    target_date = pd.to_datetime(date_str)
-    
-    store_dept_data = models.train_data[
-        (models.train_data['Store'] == store) &
-        (models.train_data['Dept'] == dept)
-    ].copy()
-
-    store_dept_data['DayOfWeek'] = store_dept_data['Date'].dt.dayofweek
-    recent_data = store_dept_data[store_dept_data['Date'] <= target_date].tail(12)
-    dow_pattern = recent_data.groupby('DayOfWeek')['Weekly_Sales'].mean()
-    dow_factor = dow_pattern.get(target_date.dayofweek, 1.0) / dow_pattern.mean() if not dow_pattern.empty else 1.0
-
-    store_dept_data['Month'] = store_dept_data['Date'].dt.month
-    month_pattern = store_dept_data.groupby('Month')['Weekly_Sales'].mean()
-    month_factor = month_pattern.get(target_date.month, 1.0) / month_pattern.mean()
-    month_factor = 1.0 + (month_factor - 1.0) * 0.5
-
-    recent_weeks = [4, 8, 12]
-    weights = [0.5, 0.3, 0.2]
-    recent_trends = []
-
-    for weeks, weight in zip(recent_weeks, weights):
-        data = store_dept_data[
-            (store_dept_data['Date'] < target_date) &
-            (store_dept_data['Date'] >= target_date - pd.Timedelta(weeks=weeks))
-        ]
-        if not data.empty:
-            recent_trends.append((data['Weekly_Sales'].mean(), weight))
-
-    recent_trend = (
-        sum(trend * weight for trend, weight in recent_trends) / 
-        sum(weight for _, weight in recent_trends)
-    ) if recent_trends else store_dept_data['Weekly_Sales'].mean()
-
-    recent_std = store_dept_data[
-        store_dept_data['Date'] >= target_date - pd.Timedelta(weeks=12)
-    ]['Weekly_Sales'].std()
-    
-    if pd.isna(recent_std):
-        recent_std = store_dept_data['Weekly_Sales'].std()
-
-    return {
-        'dow_factor': float(dow_factor),
-        'month_factor': float(month_factor),
-        'recent_trend': float(recent_trend),
-        'recent_std': float(recent_std)
-    }
 
 # Endpoints
 @app.get("/")
 def home():
+    """Endpoint de salud y estado"""
     return {
-        "health_check": "OK",
+        "status": "healthy",
         "models_available": [
             "recommender_system",
             "image_classifier",
             "sales_predictor"
-        ]
+        ],
+        "server_time": datetime.now().isoformat()
     }
 
 @app.post("/recommend")
 def get_recommendations(input_data: RecommenderInput):
-    """
-    Endpoint para obtener recomendaciones de productos.
-    """
+    """Endpoint para obtener recomendaciones de productos"""
     try:
         logger.info(f"Processing recommendation request: {input_data}")
-        
+        # Verificar el estado del recomendador
+        logger.info("Checking recommender state...")
+
+
+
+        # Verificar los archivos necesarios
+        data_files = [
+            'models/recommender/recommender.pkl',
+            'models/recommender/products_df.pkl',
+            'models/recommender/interactions_df.pkl'
+        ]
+        for file_path in data_files:
+            if not os.path.exists(file_path):
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Required file not found: {file_path}"
+                )
+                
         if input_data.user_id is not None:
             logger.info(f"Getting recommendations for user {input_data.user_id}")
             recommendations = models.recommender.get_recommendations(
@@ -283,74 +279,103 @@ def get_recommendations(input_data: RecommenderInput):
                 n_recommendations=input_data.n_recommendations
             )
 
-        return {"recommendations": recommendations}
+        return {
+            "recommendations": recommendations,
+            "metadata": {
+                "request_type": "user_based" if input_data.user_id else 
+                              "history_based" if input_data.product_history else 
+                              "popular",
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+
     except Exception as e:
         logger.error(f"Error getting recommendations: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/classify-image")
 async def classify_image(file: UploadFile = File(...)):
-    """
-    Endpoint para clasificar imágenes de productos.
-    """
+    """Endpoint para clasificar imágenes de productos"""
     try:
         logger.info(f"Processing image classification request for file: {file.filename}")
         
-        # Save uploaded file temporarily
+        # Validar tipo de archivo
+        if file.content_type not in ["image/jpeg", "image/png"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Only JPEG and PNG images are supported"
+            )
+
+        # Guardar archivo temporalmente
         temp_path = f"temp_{file.filename}"
-        with open(temp_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        try:
+            with open(temp_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
 
-        # Process image
-        img = image.load_img(temp_path, target_size=(224, 224))
-        x = image.img_to_array(img)
-        x = np.expand_dims(x, axis=0)
-        x = x/255.0
+            # Procesar imagen
+            img = image.load_img(temp_path, target_size=(224, 224))
+            x = image.img_to_array(img)
+            x = np.expand_dims(x, axis=0)
+            x = x/255.0
 
-        # Make prediction
-        prediction = models.classifier.predict(x)
-        predicted_class = models.class_names[np.argmax(prediction)]
-        confidence = float(np.max(prediction))
+            # Hacer predicción
+            prediction = models.classifier.predict(x, verbose=0)
+            class_names = ['jeans', 'sofa', 'tshirt', 'tv']
+            predicted_class = class_names[np.argmax(prediction)]
+            confidence = float(np.max(prediction))
 
-        # Clean up
-        os.remove(temp_path)
+            return {
+                "classification": {
+                    "predicted_class": predicted_class,
+                    "confidence": confidence,
+                    "probabilities": {
+                        class_name: float(prob) 
+                        for class_name, prob in zip(class_names, prediction[0])
+                    }
+                },
+                "metadata": {
+                    "filename": file.filename,
+                    "file_size": len(content),
+                    "timestamp": datetime.now().isoformat()
+                }
+            }
 
-        logger.info(f"Image classified as {predicted_class} with confidence {confidence}")
-        return {
-            "predicted_class": predicted_class,
-            "confidence": confidence
-        }
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error classifying image: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict-sales")
 def predict_sales(input_data: SalesPredictionInput):
-    """
-    Endpoint para predecir ventas.
-    """
+    """Endpoint para predecir ventas"""
     try:
         logger.info(f"Processing sales prediction request: {input_data}")
         
-        # Validate store
+        # Validaciones
         if input_data.store not in models.stores_data['Store'].values:
             raise HTTPException(status_code=400, detail=f"Invalid store: {input_data.store}")
         
-        # Validate department
         if input_data.dept not in models.train_data['Dept'].unique():
             raise HTTPException(status_code=400, detail=f"Invalid department: {input_data.dept}")
         
-        date = pd.to_datetime(input_data.date)
+        try:
+            date = pd.to_datetime(input_data.date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
         
-        # Validate date
         if date not in models.features_data['Date'].values:
             raise HTTPException(
                 status_code=400, 
                 detail=f"No feature data available for date: {input_data.date}"
             )
 
-        # Prepare sequence
+        # Preparar secuencia
         X_sequence = prepare_sequence_for_prediction(
             store=input_data.store,
             dept=input_data.dept,
@@ -360,25 +385,26 @@ def predict_sales(input_data: SalesPredictionInput):
             features_data=models.features_data
         )
 
-        # Get historical patterns (con caché)
+        # Obtener patrones históricos
         patterns = analyze_historical_patterns(
+            models.train_data,
             input_data.store,
             input_data.dept,
-            input_data.date
+            date
         )
 
-        # Make base prediction
+        # Predicción base
         X_scaled = models.scaler.transform(X_sequence)
         base_prediction = float(models.sales_model.predict(X_scaled)[0][0])
 
-        # Adjust prediction with patterns
+        # Ajustar predicción
         adjusted_prediction = base_prediction * (
             1.0 + (patterns['dow_factor'] - 1.0) * 0.7
         ) * (
             1.0 + (patterns['month_factor'] - 1.0) * 0.5
         )
 
-        # Combine with recent trend
+        # Combinar con tendencia reciente
         weight_model = 0.3
         weight_recent = 0.7
         final_prediction = (
@@ -386,51 +412,144 @@ def predict_sales(input_data: SalesPredictionInput):
             patterns['recent_trend'] * weight_recent
         )
 
-        # Calculate bounds
+        # Calcular límites
         lower_bound = patterns['recent_trend'] - 1.5 * patterns['recent_std']
         upper_bound = patterns['recent_trend'] + 1.5 * patterns['recent_std']
         final_prediction = float(np.clip(final_prediction, lower_bound, upper_bound))
 
-        logger.info(f"Sales prediction complete. Final prediction: {final_prediction}")
         return {
-            "base_prediction": base_prediction,
-            "adjusted_prediction": adjusted_prediction,
-            "final_prediction": final_prediction,
-            "patterns": patterns,
+            "predictions": {
+                "base_prediction": float(base_prediction),
+                "adjusted_prediction": float(adjusted_prediction),
+                "final_prediction": float(final_prediction)
+            },
+            "patterns": {
+                "day_of_week_factor": float(patterns['dow_factor']),
+                "month_factor": float(patterns['month_factor']),
+                "recent_trend": float(patterns['recent_trend'])
+            },
             "bounds": {
                 "lower": float(lower_bound),
                 "upper": float(upper_bound)
+            },
+            "metadata": {
+                "store": input_data.store,
+                "department": input_data.dept,
+                "date": date.strftime('%Y-%m-%d'),
+                "timestamp": datetime.now().isoformat()
             }
         }
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error predicting sales: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/valid-data")
-def get_valid_prediction_data():
-    """
-    Endpoint para obtener datos válidos para predicciones.
-    """
+@app.get("/models/status")
+def get_models_status():
+    """Endpoint para verificar el estado de los modelos"""
     try:
-        logger.info("Retrieving valid prediction data")
-        valid_stores = models.stores_data['Store'].unique().tolist()
-        valid_depts = models.train_data['Dept'].unique().tolist()
-        date_range = {
-            'min_date': models.features_data['Date'].min().strftime('%Y-%m-%d'),
-            'max_date': models.features_data['Date'].max().strftime('%Y-%m-%d')
-        }
-        
-        logger.info("Valid prediction data retrieved successfully")
         return {
-            "valid_stores": valid_stores,
-            "valid_departments": valid_depts,
-            "date_range": date_range,
-            "store_types": models.stores_data['Type'].unique().tolist(),
-            "total_stores": len(valid_stores),
-            "total_departments": len(valid_depts)
+            "recommender": {
+                "loaded": models._recommender is not None,
+                "last_load": models._last_load.get('recommender')
+            },
+            "classifier": {
+                "loaded": models._classifier is not None,
+                "last_load": models._last_load.get('classifier')
+            },
+            "sales_model": {
+                "loaded": models._sales_model is not None,
+                "last_load": models._last_load.get('sales_model')
+            },
+            "data_loaded": {
+                "train_data": models._train_data is not None,
+                "stores_data": models._stores_data is not None,
+                "features_data": models._features_data is not None
+            },
+            "server_time": datetime.now().isoformat()
         }
     except Exception as e:
-        logger.error(f"Error retrieving valid prediction data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/recommender/status")
+def get_recommender_status():
+    """Endpoint para verificar el estado del recomendador"""
+    try:
+        recommender = models.recommender
+        has_popular = hasattr(recommender, 'popular_recommendations')
+        num_popular = len(recommender.popular_recommendations) if has_popular else 0
+        
+        return {
+            "status": "loaded",
+            "has_popular_recommendations": has_popular,
+            "num_popular_recommendations": num_popular,
+            "data_dir_exists": recommender.data_dir.exists(),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/system/check")
+def check_system():
+    """Verifica la existencia de archivos necesarios y estructura del sistema"""
+    try:
+        files_to_check = {
+            'recommender': [
+                'models/recommender/recommender.pkl',
+                'models/recommender/products_df.pkl',
+                'models/recommender/interactions_df.pkl'
+            ],
+            'classifier': [
+                'models/classifier/ecommerce_classifier.h5'
+            ],
+            'sales': [
+                'models/sales/sales_prediction_model.h5',
+                'models/sales/scaler.pkl',
+                'data/train.csv',
+                'data/stores.csv',
+                'data/features.csv'
+            ]
+        }
+
+        status = {}
+        for model, paths in files_to_check.items():
+            status[model] = {
+                'files_exist': all(os.path.exists(p) for p in paths),
+                'files_status': {
+                    p: {
+                        'exists': os.path.exists(p),
+                        'size': os.path.getsize(p) if os.path.exists(p) else 0
+                    } for p in paths
+                }
+            }
+
+        return {
+            'system_check': status,
+            'current_working_directory': os.getcwd(),
+            'timestamp': datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/models/reload")
+def reload_models():
+    """Endpoint para recargar todos los modelos"""
+    try:
+        models.clear_cache()
+        return {"status": "success", "message": "All models reloaded successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+models = ModelManager()
+
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
