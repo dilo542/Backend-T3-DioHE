@@ -13,16 +13,19 @@ import json
 
 class ImprovedRecommender:
     def __init__(self, chunk_size: int = 1000):
-        self.chunk_size = chunk_size
-        self.setup_logging()
-        self.data_dir = Path('models/recommender/recommender_data')
-        self.data_dir.mkdir(exist_ok=True)
+    self.chunk_size = chunk_size
+    self.setup_logging()
+    self.data_dir = Path('recommender_data')
+    self.data_dir.mkdir(exist_ok=True)
 
-        # Constantes
-        self.PRICE_RANGE_FACTOR = 0.3
-        self.CATEGORY_BOOST = 0.4
-        self.GENDER_BOOST = 0.5
-        self.MIN_RATING_WEIGHT = 3
+    # Constantes
+    self.PRICE_RANGE_FACTOR = 0.3
+    self.CATEGORY_BOOST = 0.4
+    self.GENDER_BOOST = 0.5
+    self.MIN_RATING_WEIGHT = 3
+
+    # Inicializar popular_recommendations como una lista vacía
+    self.popular_recommendations = []
 
     def setup_logging(self):
         self.logger = logging.getLogger('ImprovedRecommender')
@@ -50,23 +53,55 @@ class ImprovedRecommender:
     def process_data(self, products_df: pd.DataFrame, interactions_df: pd.DataFrame):
         """Process and prepare all data"""
         self.logger.info("Starting data processing...")
-
+    
         # Initialize dimensions
         self._initialize_dimensions(products_df)
-
+    
         # Process and save product data
         self._process_products(products_df)
-
+    
         # Process and save interaction data
         self._process_interactions(interactions_df)
-
-        # Pre-compute popular recommendations
+    
+        # Importante: Computar las recomendaciones populares después de procesar los datos
         self._precompute_popular_recommendations()
-
+    
         # Generate and save metadata
         self._save_metadata(products_df, interactions_df)
-
+    
         self.logger.info("Data processing completed")
+    
+    def _precompute_popular_recommendations(self, n_recommendations: int = 1000):
+        """Pre-compute popular recommendations"""
+        self.logger.info("Pre-computing popular recommendations...")
+        try:
+            products_info = pd.read_parquet(self.data_dir / 'products_info.parquet')
+            
+            products_info = products_info.dropna(subset=['discount_price', 'ratings', 'no_of_ratings'])
+            products_info['weighted_rating'] = products_info['ratings'] * np.log1p(products_info['no_of_ratings'])
+    
+            self.popular_recommendations = (
+                products_info
+                .nlargest(n_recommendations, 'weighted_rating')
+                [['product_id', 'name', 'main_category', 'discount_price', 'ratings', 'weighted_rating']]
+                .rename(columns={
+                    'product_id': 'id', 
+                    'discount_price': 'price', 
+                    'weighted_rating': 'score'
+                })
+                .to_dict(orient='records')
+            )
+            
+            self.logger.info(f"Pre-computed {len(self.popular_recommendations)} popular recommendations")
+        except Exception as e:
+            self.logger.error(f"Error pre-computing popular recommendations: {str(e)}")
+            self.popular_recommendations = []
+    
+    def _get_popular_recommendations(self, n_recommendations: int = 5) -> List[Dict]:
+        """Get pre-computed popular recommendations"""
+        if not hasattr(self, 'popular_recommendations') or not self.popular_recommendations:
+            self._precompute_popular_recommendations()
+        return self.popular_recommendations[:n_recommendations]
 
     def _process_products(self, products_df: pd.DataFrame):
         """Process and save product data"""
@@ -393,25 +428,7 @@ class ImprovedRecommender:
             self.logger.error(f"Error getting candidate products: {str(e)}")
             return []
 
-    def _precompute_popular_recommendations(self, n_recommendations: int = 1000):
-        """Pre-compute popular recommendations"""
-        self.logger.info("Pre-computing popular recommendations...")
-        products_info = pd.read_parquet(self.data_dir / 'products_info.parquet')
-        
-        products_info = products_info.dropna(subset=['discount_price', 'ratings', 'no_of_ratings'])
-        products_info['weighted_rating'] = products_info['ratings'] * np.log1p(products_info['no_of_ratings'])
 
-        self.popular_recommendations = (
-            products_info
-            .nlargest(n_recommendations, 'weighted_rating')
-            [['product_id', 'name', 'main_category', 'discount_price', 'ratings', 'weighted_rating']]
-            .rename(columns={
-                'product_id': 'id', 
-                'discount_price': 'price', 
-                'weighted_rating': 'score'
-            })
-            .to_dict(orient='records')
-        )
 
     def get_recommendations(self, user_id: int, n_recommendations: int = 5) -> List[Dict]:
         """Get personalized recommendations for a user"""
@@ -477,9 +494,7 @@ class ImprovedRecommender:
             self.logger.error(f"Error getting recommendations from history: {str(e)}")
             return self._get_popular_recommendations(n_recommendations)
 
-    def _get_popular_recommendations(self, n_recommendations: int = 5) -> List[Dict]:
-        """Get pre-computed popular recommendations"""
-        return self.popular_recommendations[:n_recommendations]
+
 
     def cleanup(self):
         """Clean up temporary files"""
