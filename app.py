@@ -53,7 +53,49 @@ class ModelManager:
         self._features_data = None
         self._last_load = {}
         self._model_cache = {}
-        
+    def load_initial_models(self):
+        """Carga inicial de modelos y datos"""
+        try:
+            logger.info("Loading initial models and data...")
+            
+            # Cargar recomendador y sus datos
+            if os.path.exists('models/recommender/recommender.pkl'):
+                with open('models/recommender/recommender.pkl', 'rb') as f:
+                    self._recommender = CustomUnpickler(f).load()
+                self._products_df = pd.read_pickle('models/recommender/products_df.pkl')
+                self._interactions_df = pd.read_pickle('models/recommender/interactions_df.pkl')
+                self._recommender.process_data(self._products_df, self._interactions_df)
+                logger.info("Recommender system loaded successfully")
+            else:
+                logger.warning("Recommender model files not found")
+
+            # Cargar clasificador
+            if os.path.exists('models/classifier/ecommerce_classifier.h5'):
+                self._classifier = tf.keras.models.load_model(
+                    'models/classifier/ecommerce_classifier.h5',
+                    compile=False
+                )
+                logger.info("Classifier loaded successfully")
+            else:
+                logger.warning("Classifier model file not found")
+
+            # Cargar modelo de ventas y datos relacionados
+            if os.path.exists('models/sales/sales_prediction_model.h5'):
+                self._sales_model = tf.keras.models.load_model(
+                    'models/sales/sales_prediction_model.h5',
+                    compile=False
+                )
+                self._scaler = joblib.load('models/sales/scaler.pkl')
+                self._train_data = pd.read_csv('data/train.csv')
+                self._stores_data = pd.read_csv('data/stores.csv')
+                self._features_data = pd.read_csv('data/features.csv')
+                logger.info("Sales prediction model and data loaded successfully")
+            else:
+                logger.warning("Sales prediction model files not found")
+
+        except Exception as e:
+            logger.error(f"Error loading initial models: {str(e)}")
+            raise    
     def _check_reload_needed(self, model_name: str, reload_interval: int = 3600) -> bool:
         """Verifica si un modelo necesita ser recargado basado en el tiempo"""
         last_load = self._last_load.get(model_name)
@@ -440,7 +482,47 @@ def get_recommender_status():
             "timestamp": datetime.now().isoformat()
         }
 
+@app.get("/system/check")
+def check_system():
+    """Verifica la existencia de archivos necesarios y estructura del sistema"""
+    try:
+        files_to_check = {
+            'recommender': [
+                'models/recommender/recommender.pkl',
+                'models/recommender/products_df.pkl',
+                'models/recommender/interactions_df.pkl'
+            ],
+            'classifier': [
+                'models/classifier/ecommerce_classifier.h5'
+            ],
+            'sales': [
+                'models/sales/sales_prediction_model.h5',
+                'models/sales/scaler.pkl',
+                'data/train.csv',
+                'data/stores.csv',
+                'data/features.csv'
+            ]
+        }
 
+        status = {}
+        for model, paths in files_to_check.items():
+            status[model] = {
+                'files_exist': all(os.path.exists(p) for p in paths),
+                'files_status': {
+                    p: {
+                        'exists': os.path.exists(p),
+                        'size': os.path.getsize(p) if os.path.exists(p) else 0
+                    } for p in paths
+                }
+            }
+
+        return {
+            'system_check': status,
+            'current_working_directory': os.getcwd(),
+            'timestamp': datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @app.post("/models/reload")
 def reload_models():
     """Endpoint para recargar todos los modelos"""
@@ -449,6 +531,11 @@ def reload_models():
         return {"status": "success", "message": "All models reloaded successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+models = ModelManager()
+
+
 
 if __name__ == "__main__":
     import uvicorn
